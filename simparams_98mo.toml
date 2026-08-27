@@ -3,25 +3,30 @@
 
 [params]
 
-tau_seed = 0.19745 # in [s]
+tau_seed = 0.13099 # in [s]
 
-timestep = 0.01048  # in [s]
-n_sim_steps = 153 # approx. 1.6 s total time after injection
+timestep = 0.009  # in [s]
+n_sim_steps = 179 # approx. 1.6 s total time after injection
 
-n_sim = 151  # 32 number of simulated decays in setting 1
+n_sim = 300  # 32 number of simulated decays in setting 1
 n_trials = 1000
 
 n_decay_steps = 0  # either 0 or 1
 
-mean_ion = 9.44e-7
-stdv_ion = 7.7408e-8 # MEAN_ION * 0.082
+mean_ion_number = 18
+max_ions = 50
 
-mean_bkgnd = 5.44e-7
-stdv_bkgnd = 2.06e-8 # MEAN_BKGND * 0.038
+noise_model = "linear" # "sqrt" or "linear"
+mean_ion = 2.72
+stdv_ion = 0.86 # MEAN_ION * 0.082
+
+mean_bkgnd = 1.67
+stdv_bkgnd = 0.59 # MEAN_BKGND * 0.038
 
 empty_shots = false
 empty_shots_probability = 0.0
 
+limit = 200
 
 [settings]
 

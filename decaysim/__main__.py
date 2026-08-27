@@ -38,12 +38,16 @@ class Simulator:
         self.params_n_sim = config.params.n_sim
         self.params_n_trials = config.params.n_trials
         self.params_n_decay_steps = config.params.n_decay_steps
+        self.params_mean_ion_number = config.params.mean_ion_number
+        self.params_max_ions = config.params.max_ions
         self.params_mean_ion = config.params.mean_ion
+        self.params_noise_model = config.params.noise_model
         self.params_stdv_ion = config.params.stdv_ion
         self.params_mean_bkgnd = config.params.mean_bkgnd
         self.params_stdv_bkgnd = config.params.stdv_bkgnd
         self.params_empty_shots = config.params.empty_shots
         self.params_empty_shots_probability = config.params.empty_shots_probability
+        self.params_limit = config.params.limit
 
         # handle trailing slash and file path properly
         self.settings_output_path = os.path.join(config.settings.output_path, "")
@@ -120,13 +124,72 @@ class Simulator:
                 self.params_timestep * self.params_n_sim_steps / self.params_timestep
             ),
 
-            # TODO:
-            # the range of hist and x do not match with certain self.params_n_sim_steps
             range=(0, self.params_timestep * self.params_n_sim_steps),
 
         )[0]
         
         return hist / np.max(hist)
+    
+    def plot_multi_ion_decay(self, x, n_alive, I_t, b, trial_number, limit):
+
+        # Identify plateau boundaries (where n_alive changes)
+        changes = np.where(np.diff(n_alive) != 0)[0]
+        boundaries = np.concatenate(([0], changes + 1, [len(n_alive)]))
+        x_ms = x*1000
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        # Plot raw intensity
+        ax.plot(x_ms, b, color='blue', alpha=0.6, label='Intensity')
+        mean_label_used = False
+        # Plot plateau means + std bands
+        for i in range(len(boundaries) - 1):
+            s = boundaries[i]
+            e = boundaries[i + 1]
+            
+            n = n_alive[s]  # ion count in this plateau
+            plateau = b[s:e]
+            if x_ms[e-1] < 0.001:   # skip first 1 ms
+                continue
+
+            mean = plateau.mean()
+            std = plateau.std(ddof=1)
+
+            # horizontal line for plotting the mean
+            ax.hlines(mean, x_ms[s] - (x_ms[1]-x_ms[0]), x_ms[e-1], colors='red', linewidth=2, label="Mean Intensity" if not mean_label_used else None)
+            
+            mean_label_used = True
+            
+            # annotate ion count
+            interval_width = x_ms[e-1] - x_ms[s]
+            
+            if x_ms[e-1]>=limit:  # if the interval exceeds the x limit showed, adjust the label accordingly.
+                last_x = limit
+            else: last_x = x_ms[e-1]     #else:  Normal placement: centered in plateau
+            label_x = (x_ms[s] + last_x) / 2
+            #label_y = mean + 0.6*std
+            ax.text(label_x, np.max(b),
+                    f"{n} ions", ha='center', va='bottom',
+                    fontsize=10, bbox=dict(facecolor='white', alpha=0.8))
+
+        # Mark decay times
+        decay_times = x_ms[changes]
+        for t in decay_times:
+            ax.axvline(t, color='black', linestyle='--', linewidth=1)
+
+        #ax.set_title(f"Multi-ion decay (trial {trial_number})")
+        ax.set_xlim(0,limit)
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Amplitude [a.u.]")
+        ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
+        ax.set_xticks(plt.xticks()[0], plt.xticks()[0] / 1000.0)
+        ax.yaxis.get_offset_text().set_fontsize(12)
+        ax.legend()
+        ax.grid(True)
+        plt.tight_layout()
+        outname = f"{self.settings_output_path}/multi_decay_trial_{trial_number:04}.png"
+        plt.savefig(outname, dpi=150)
+        plt.close()
+
 
     def create_from_events_with_fluctuations(
         self, x, trial_number, add_empty_shots=False
@@ -141,27 +204,98 @@ class Simulator:
             ],
         )
 
+        t_max = 10 * self.params_tau_seed
+        mask = x <= t_max
+
         for i in range(self.params_n_sim):
-            num = np.random.exponential(self.params_tau_seed)
-            b = np.random.normal(self.params_mean_ion, self.params_stdv_ion, len(x))
-            idx = np.where(x < num)[0][-1]
 
-            if self.params_n_decay_steps == 0:
-                b[idx : len(x)] = np.random.normal(
-                    self.params_mean_bkgnd, self.params_stdv_bkgnd, len(x) - idx
-                )
+            # -----------------------------
+            # 1. Draw number of ions
+            # -----------------------------
+            # Option A: Poisson (default)
+            n_ions = np.random.poisson(self.params_mean_ion_number)
+            n_ions = min(n_ions, self.params_max_ions)
 
-            elif self.params_n_decay_steps == 1:
-                b[idx : idx + 1] = self.params_mean_ion / 2
-                b[idx + 1 : len(x)] = np.random.normal(
-                    self.params_mean_bkgnd, self.params_stdv_bkgnd, len(x) - idx - 1
-                )
 
+            # If empty shot → force zero ions
             if add_empty_shots and empty_shot_mask[i]:
-                b = np.random.normal(
-                    self.params_mean_bkgnd, self.params_stdv_bkgnd, len(x)
-                )
+                n_ions = 0
 
+            # -----------------------------
+            # 2. If no ions → pure background
+            # -----------------------------
+            if n_ions == 0:
+                b = np.random.normal(self.params_mean_bkgnd,
+                                    self.params_stdv_bkgnd,
+                                    len(x))
+                #b = b[mask]
+                b_arr = np.append(b_arr, b)
+                continue
+
+            decay_times = np.random.exponential(self.params_tau_seed, size=n_ions)
+            decay_times.sort()
+
+            n_alive = n_ions - np.searchsorted(decay_times, x, side="right")
+
+            # -----------------------------
+            # 5. Convert n(t) to intensity using your calibrated ladder
+            # -----------------------------
+            # I(n) = I0 + n*(I1 - I0)
+            I0 = self.params_mean_bkgnd
+            I1 = self.params_mean_ion
+            I_t = I0 + n_alive * (I1 - I0)
+            
+            # -----------------------------
+            # 6. Noise model (selectable)
+            # -----------------------------
+
+            ladder_spacing = (I1 - I0)
+
+            if self.params_noise_model == "sqrt":
+                sigma_ion = self.params_stdv_ion * np.sqrt(n_alive)
+                sigma_bkg = self.params_stdv_bkgnd
+
+            elif self.params_noise_model == "linear":
+                # sigma(n) = std_dev_bkg + n * std_dev_ion
+                sigma_ion = self.params_stdv_bkgnd + n_alive * self.params_stdv_ion
+                sigma_bkg = self.params_stdv_bkgnd
+
+            else:
+                # fallback: old model
+                sigma_ion = self.params_stdv_ion * np.sqrt(n_alive)
+                sigma_bkg = self.params_stdv_bkgnd
+
+            # draw noise
+            noise_ion = np.random.normal(0, sigma_ion)
+            noise_bkg = np.random.normal(0, sigma_bkg, len(x))
+
+            noise = np.where(n_alive > 0, noise_ion, noise_bkg)
+
+            # Zero-mean noise for ions and background
+            noise_ion = np.random.normal(0, sigma_ion)
+            noise_bkg = np.random.normal(0, sigma_bkg, len(x))
+
+            # Select noise depending on ion count
+            noise = np.where(n_alive > 0, noise_ion, noise_bkg)
+
+            # Add noise to ladder
+            b = I_t + noise
+
+            # Enforce positivity
+            b = np.clip(b, I0 * 0.5, None)
+
+            # Enforce ordering: I(n) > I(n-1)
+            for n in range(1, np.max(n_alive) + 1):
+                mask_n = (n_alive == n)
+                mask_prev = (n_alive == n - 1)
+                if np.any(mask_prev):
+                    mean_prev = np.mean(b[mask_prev])
+                    mean_curr = np.mean(b[mask_n])
+
+                    if mean_curr <= mean_prev:
+                    # shift entire plateau upward
+                        shift = (mean_prev - mean_curr) + 0.1 * ladder_spacing
+                        b[mask_n] += shift
             b_arr = np.append(b_arr, b)
 
             if self.settings_plot_every_event:
@@ -174,6 +308,7 @@ class Simulator:
 
                 plt.xlabel("Time [s]")
                 plt.ylabel("Amplitude [a.u.]")
+                plt.xticks(plt.xticks()[0], plt.xticks()[0] / 1000.0)
                 #plt.grid()
                 outfilename = f"{self.settings_output_path}trial{trial_number:04}_decay{i:04}_ts{self.params_tau_seed:.2e}"
                 plt.tight_layout()
@@ -181,10 +316,17 @@ class Simulator:
                 plt.close()
                 if self.settings_save_npz:
                     np.savez(outfilename + ".npz", x=x, y=y)
+        
 
-        b_arr = np.reshape(b_arr, (self.params_n_sim, len(b)))
+            if trial_number < 50 and i==0:
+                #x_axis = np.arange(len(I_t)) * self.params_timestep
+                #x_axis = x[mask]
+                self.plot_multi_ion_decay(x[mask], n_alive[mask], I_t[mask], b[mask], trial_number, self.params_limit)
+
+        b_arr = np.reshape(b_arr, (self.params_n_sim, len(x)))
         b_arr_avg = np.average(b_arr, axis=0)
-        return b_arr_avg
+        b_arr_sum = np.sum(b_arr, axis=0)
+        return b_arr_sum
 
     def get_mle(self, x):
         samples = np.random.exponential(self.params_tau_seed, size=len(x))
@@ -198,12 +340,14 @@ class Simulator:
         # new definition with right-sensoring
         obs_window = self.params_timestep * self.params_n_sim_steps 
         cutoff_samples =  samples[samples < obs_window]
-        mle_est = np.mean(cutoff_samples) + ( self.params_n_sim - len(cutoff_samples) ) * obs_window /  len(cutoff_samples)
-        return mle_est
+        mle_est = np.mean(cutoff_samples) + ( len(samples) - len(cutoff_samples) ) * obs_window /  len(cutoff_samples)
+        #return mle_est
+        return np.mean(samples[samples < self.params_timestep * self.params_n_sim_steps])
 
     def fit_exponential(self, x, y):
         p = [
-            self.params_mean_ion,
+            #self.params_mean_ion,
+            y[0],
             self.params_tau_seed,
             self.params_mean_bkgnd,
         ]
@@ -226,7 +370,9 @@ class Simulator:
         ax.step(x, y, label=id_string, where="post")
         yfit = Simulator.expo_func_3(x, *popt)
         if display_fit:
-            ax.plot(x, yfit, label=fr'$\tau =$ {popt[1]:0.2e}', alpha=0.6, color="#DC143C")  # color Crimson
+            ax.plot(x, yfit, label="fit",
+                    #fr'$\tau =$ {popt[1]:0.2e}',
+                    alpha=0.6, color="#DC143C")  # color Crimson
         
         outfilename = f"{self.settings_output_path}{id_string}_ts{self.params_tau_seed:.2e}_t{popt[1]:.2e}_{self.simulation_duration:.2f}s"
 
@@ -241,6 +387,8 @@ class Simulator:
             title=title,
         )
         # ax.grid()
+        ax.set_xlim(-0.02,0.5)
+        ax.grid(True)
         legend = ax.legend(fontsize=14)
         for text in legend.get_texts():
             text.set_verticalalignment('center')  # Options: 'top', 'bottom', 'center', 'baseline'
@@ -319,7 +467,11 @@ class Simulator:
         x = np.arange(
             0, self.params_timestep * self.params_n_sim_steps, self.params_timestep
         )  # start, stop, step in seconds
-
+        
+        t_max = 10 * self.params_tau_seed
+        mask = x <= t_max
+        x_trunc = x[mask]
+        
         xvals = np.arange(
             -self.params_tau_seed, self.params_tau_seed, 2 * self.params_tau_seed / 1000
         )
@@ -327,11 +479,15 @@ class Simulator:
         if 'addup' in self.settings_tasks:
             logger.info('Performing simulation task: addup')
             for trial_number in tqdm(range(self.params_n_trials)):
+            # Diagnostic: inspect tau_events_arr and sigma_events_arr
+                
+
                 try:
                     # y1 = self.create_from_events_boxcar(x)
                     y1 = self.create_from_events_with_fluctuations(
                         x, trial_number, add_empty_shots=self.params_empty_shots
                     )
+                    x_trunc = x[x <= 10 * self.params_tau_seed]
                     popt_events, pcov_events = self.fit_exponential(x, y1)
                     tau_events_arr[trial_number] = popt_events[1]
 
@@ -361,6 +517,16 @@ class Simulator:
             logger.info(f"Sigma_tru from add up is = {sigma_tru_from_addup}")
 
             logger.info("Creating sigma distribution from add up spectra.")
+            
+            plt.figure()
+            plt.hist(sigma_events_arr, bins=50, alpha=0.7)
+            plt.xlabel("σ_sim_old")
+            plt.ylabel("Counts")
+            plt.title("Distribution of σ_sim_old")
+            plt.tight_layout()
+            plt.savefig(f"{self.settings_output_path}/sigma_sim_old_distribution.png", dpi=150)
+            plt.close()
+
             popt = self.fit_and_plot_gaussian(
                 xvals, sigma_events_arr, id_string="sigma_from_addup"
             )
@@ -468,13 +634,16 @@ class Params(BaseModel):
     n_sim: int
     n_trials: int
     n_decay_steps: int = Field(..., ge=0, le=1)
+    mean_ion_number: int
+    noise_model: str
+    max_ions: int
     mean_ion: float
     stdv_ion: float
     mean_bkgnd: float
     stdv_bkgnd: float
     empty_shots: bool
     empty_shots_probability: float = Field(..., ge=0.0, le=1.0)
-
+    limit: int
 
 class Settings(BaseModel):
     output_path: str
