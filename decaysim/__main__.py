@@ -201,6 +201,15 @@ class Simulator:
     def create_from_events_with_fluctuations(
         self, x, trial_number, add_empty_shots=False
     ):
+        """Simulate one add-up trial (n_sim injections, summed).
+
+        noise_model options:
+          "sqrt"       sigma_ion = stdv_ion * sqrt(n)
+          "linear"     sigma_ion = stdv_bkgnd + n * stdv_ion
+          "quadrature" sigma_ion = sqrt(stdv_bkgnd**2 + (n * stdv_ion)**2)
+                       (RionSiS noise model, originally established in
+                       Moritz Porstendoerfer's Bachelor thesis)
+        """
         b_arr = np.array([])
         empty_shot_mask = self.rng.choice(
             [0, 1],
@@ -265,6 +274,12 @@ class Simulator:
             elif self.params_noise_model == "linear":
                 # sigma(n) = std_dev_bkg + n * std_dev_ion
                 sigma_ion = self.params_stdv_bkgnd + n_alive * self.params_stdv_ion
+                sigma_bkg = self.params_stdv_bkgnd
+
+            elif self.params_noise_model == "quadrature":
+                # sigma(n) = sqrt(std_dev_bkg^2 + (n * std_dev_ion)^2), i.e.
+                # the RionSiS noise model (see docstring for provenance).
+                sigma_ion = np.sqrt(self.params_stdv_bkgnd**2 + (n_alive * self.params_stdv_ion) ** 2)
                 sigma_bkg = self.params_stdv_bkgnd
 
             else:
