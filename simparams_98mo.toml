@@ -28,6 +28,8 @@ empty_shots_probability = 0.0
 
 limit = 200
 
+seed = 42  # fixes the RNG for reproducible runs; omit/remove for nondeterministic runs
+
 [settings]
 
 tasks = ['addup', 'mle'] # Tasks: what to simulate, like 'addup', 'distro', 'mle'

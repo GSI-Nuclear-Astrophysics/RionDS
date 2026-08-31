@@ -49,6 +49,12 @@ class Simulator:
         self.params_empty_shots_probability = config.params.empty_shots_probability
         self.params_limit = config.params.limit
 
+        # Explicit, seedable RNG (no hidden global np.random state). A
+        # fixed integer seed makes every run bit-reproducible; None falls
+        # back to nondeterministic OS entropy, same as before this fix.
+        self.params_seed = config.params.seed
+        self.rng = np.random.default_rng(self.params_seed)
+
         # handle trailing slash and file path properly
         self.settings_output_path = os.path.join(config.settings.output_path, "")
         self.settings_plot_every_event = config.settings.plot_every_event
@@ -62,6 +68,7 @@ class Simulator:
 
         logger.info("Simulation start. Enter command or ctrl-C to abort.")
         logger.info(f"Output file path: {self.settings_output_path}")
+        logger.info(f"RNG seed: {self.params_seed if self.params_seed is not None else 'None (nondeterministic)'}")
 
     @staticmethod
     def gaussian_function(x, *p):
@@ -89,7 +96,7 @@ class Simulator:
 
         for i in range(self.params_n_sim):
             # create a single random number based on an exponential distribution
-            num = np.random.exponential(self.params_tau_seed)
+            num = self.rng.exponential(self.params_tau_seed)
 
             idx = np.where(x < num)[0][-1]
             b = np.zeros(len(x))
@@ -117,7 +124,7 @@ class Simulator:
         return b_arr_avg
 
     def create_from_distribution(self, x):
-        data = np.random.exponential(self.params_tau_seed, size=len(x))
+        data = self.rng.exponential(self.params_tau_seed, size=len(x))
         hist = np.histogram(
             data,
             bins=int(
@@ -195,7 +202,7 @@ class Simulator:
         self, x, trial_number, add_empty_shots=False
     ):
         b_arr = np.array([])
-        empty_shot_mask = np.random.choice(
+        empty_shot_mask = self.rng.choice(
             [0, 1],
             size=self.params_n_sim,
             p=[
@@ -213,7 +220,7 @@ class Simulator:
             # 1. Draw number of ions
             # -----------------------------
             # Option A: Poisson (default)
-            n_ions = np.random.poisson(self.params_mean_ion_number)
+            n_ions = self.rng.poisson(self.params_mean_ion_number)
             n_ions = min(n_ions, self.params_max_ions)
 
 
@@ -225,14 +232,14 @@ class Simulator:
             # 2. If no ions → pure background
             # -----------------------------
             if n_ions == 0:
-                b = np.random.normal(self.params_mean_bkgnd,
+                b = self.rng.normal(self.params_mean_bkgnd,
                                     self.params_stdv_bkgnd,
                                     len(x))
                 #b = b[mask]
                 b_arr = np.append(b_arr, b)
                 continue
 
-            decay_times = np.random.exponential(self.params_tau_seed, size=n_ions)
+            decay_times = self.rng.exponential(self.params_tau_seed, size=n_ions)
             decay_times.sort()
 
             n_alive = n_ions - np.searchsorted(decay_times, x, side="right")
@@ -265,17 +272,9 @@ class Simulator:
                 sigma_ion = self.params_stdv_ion * np.sqrt(n_alive)
                 sigma_bkg = self.params_stdv_bkgnd
 
-            # draw noise
-            noise_ion = np.random.normal(0, sigma_ion)
-            noise_bkg = np.random.normal(0, sigma_bkg, len(x))
-
-            noise = np.where(n_alive > 0, noise_ion, noise_bkg)
-
-            # Zero-mean noise for ions and background
-            noise_ion = np.random.normal(0, sigma_ion)
-            noise_bkg = np.random.normal(0, sigma_bkg, len(x))
-
-            # Select noise depending on ion count
+            # Zero-mean noise for ions and background, selected per bin by ion count
+            noise_ion = self.rng.normal(0, sigma_ion)
+            noise_bkg = self.rng.normal(0, sigma_bkg, len(x))
             noise = np.where(n_alive > 0, noise_ion, noise_bkg)
 
             # Add noise to ladder
@@ -329,20 +328,16 @@ class Simulator:
         return b_arr_sum
 
     def get_mle(self, x):
-        samples = np.random.exponential(self.params_tau_seed, size=len(x))
-        
-        # old definition: takes all points
-        # return np.mean(samples)
-        
-        # new definition with cut-off
-        #return np.mean(samples[samples < self.params_timestep * self.params_n_sim_steps])
-        
-        # new definition with right-sensoring
-        obs_window = self.params_timestep * self.params_n_sim_steps 
-        cutoff_samples =  samples[samples < obs_window]
-        mle_est = np.mean(cutoff_samples) + ( len(samples) - len(cutoff_samples) ) * obs_window /  len(cutoff_samples)
-        #return mle_est
-        return np.mean(samples[samples < self.params_timestep * self.params_n_sim_steps])
+        # MLE of the exponential mean under Type-I right censoring at
+        # obs_window: samples >= obs_window are censored (only known to
+        # have survived at least obs_window), which the sample mean of
+        # observed-only points ignores, biasing the estimate low.
+        samples = self.rng.exponential(self.params_tau_seed, size=len(x))
+        obs_window = self.params_timestep * self.params_n_sim_steps
+        cutoff_samples = samples[samples < obs_window]
+        n_censored = len(samples) - len(cutoff_samples)
+        mle_est = np.mean(cutoff_samples) + n_censored * obs_window / len(cutoff_samples)
+        return mle_est
 
     def fit_exponential(self, x, y):
         p = [
@@ -644,6 +639,7 @@ class Params(BaseModel):
     empty_shots: bool
     empty_shots_probability: float = Field(..., ge=0.0, le=1.0)
     limit: int
+    seed: int | None = None
 
 class Settings(BaseModel):
     output_path: str
